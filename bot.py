@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 from datetime import date
@@ -370,7 +371,6 @@ async def unexpected(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Main ───────────────────────────────────────────────────────────
 
 def main():
-    import asyncio
     token = os.environ.get("BOT_TOKEN", "")
     if not token: raise RuntimeError("BOT_TOKEN not set!")
     logger.info("Starting CoBuilt Quote Bot…")
@@ -402,18 +402,7 @@ def main():
     )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
-    async def run():
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-        )
-        await app.updater.idle()
-        await app.stop()
-        await app.shutdown()
-
-    asyncio.run(run())
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
