@@ -1,21 +1,21 @@
 import asyncio
 import os
 import logging
+import warnings
 from datetime import date
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.warnings import PTBUserWarning
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ConversationHandler, ContextTypes, filters,
 )
 from pdf_generator import generate_quote_pdf
 
+warnings.filterwarnings("ignore", category=PTBUserWarning)
+
 logging.basicConfig(format="%(asctime)s  %(name)s  %(levelname)s  %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-import warnings
-from telegram.warnings import PTBUserWarning
-warnings.filterwarnings("ignore", category=PTBUserWarning)
 
 DATA_DIR     = os.environ.get("DATA_DIR", "/data")
 PDF_DIR      = os.path.join(DATA_DIR, "quotes")
@@ -26,9 +26,12 @@ ALL_GRADES = ["C-20","C-25","C-30","C-35","C-40","C-45","C-50","C-55","C-60"]
 
 (
     ASK_CLIENT, ASK_LOCATION, ASK_GRADE, ASK_MANUAL_GRADE,
-    ASK_PRICE, ASK_VOLUME, ASK_PUMP_TYPE, ASK_PUMP_RATE, ASK_ADDITIONAL,
-) = range(9)
+    ASK_PRICE, ASK_VOLUME, ASK_ADDITIONAL, ASK_PUMP_TYPE,
+    ASK_PUMP_RATE, ASK_NEW_QUOTE,
+) = range(10)
 
+
+# ── Helpers ────────────────────────────────────────────────────────
 
 def next_quote_number() -> str:
     try:
@@ -67,11 +70,24 @@ def grade_select_kb(selected: list) -> InlineKeyboardMarkup:
 
 def pump_type_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🐘 Elephant Pump", callback_data="pump:elephant"),
-         InlineKeyboardButton("🏗️ Stationary Pump", callback_data="pump:stationary")],
-        [InlineKeyboardButton("🚫 No Pump", callback_data="pump:none")],
-        [InlineKeyboardButton("◀️ Back", callback_data="back:grades")],
+        [InlineKeyboardButton("🐘 Elephant Pump",    callback_data="pump:elephant"),
+         InlineKeyboardButton("🏗️ Stationary Pump",  callback_data="pump:stationary")],
+        [InlineKeyboardButton("🚫 No Pump",           callback_data="pump:none")],
+        [InlineKeyboardButton("◀️ Back",              callback_data="back:additional")],
     ])
+
+
+def pump_rate_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭️ Skip", callback_data="pumprate:skip")],
+        [InlineKeyboardButton("◀️ Back", callback_data="back:pump_type")],
+    ])
+
+
+def new_quote_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Start New Quote", callback_data="newquote:start"),
+    ]])
 
 
 def back_kb(target: str) -> InlineKeyboardMarkup:
@@ -112,11 +128,12 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def got_client(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     name = update.message.text.strip()
     if not name:
-        await update.message.reply_text("⚠️ Client name cannot be empty. Try again:"); return ASK_CLIENT
+        await update.message.reply_text("⚠️ Client name cannot be empty. Try again:")
+        return ASK_CLIENT
     ctx.user_data["client"] = name
     await update.message.reply_text(
-        "📍 *Step 2:* Enter Project Location:", parse_mode="Markdown",
-        reply_markup=back_kb("client"))
+        "📍 *Step 2:* Enter Project Location:",
+        parse_mode="Markdown", reply_markup=back_kb("client"))
     return ASK_LOCATION
 
 
@@ -125,7 +142,8 @@ async def got_client(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def got_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     loc = update.message.text.strip()
     if not loc:
-        await update.message.reply_text("⚠️ Location cannot be empty. Try again:"); return ASK_LOCATION
+        await update.message.reply_text("⚠️ Location cannot be empty. Try again:")
+        return ASK_LOCATION
     ctx.user_data["location"] = loc
     ctx.user_data["selected_grades"] = []
     await update.message.reply_text(
@@ -148,7 +166,8 @@ async def cb_grade_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
 
     if action == "DONE":
         if not selected:
-            await query.answer("⚠️ Select at least one grade.", show_alert=True); return ASK_GRADE
+            await query.answer("⚠️ Select at least one grade.", show_alert=True)
+            return ASK_GRADE
         ctx.user_data["grade_queue"] = list(selected)
         ctx.user_data["grades"] = []
         return await _ask_price(query, ctx)
@@ -165,7 +184,8 @@ async def cb_grade_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
 async def got_manual_grade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     grade = update.message.text.strip().upper()
     if not grade:
-        await update.message.reply_text("⚠️ Enter a valid grade label:"); return ASK_MANUAL_GRADE
+        await update.message.reply_text("⚠️ Enter a valid grade label:")
+        return ASK_MANUAL_GRADE
     selected = ctx.user_data.setdefault("selected_grades", [])
     if grade not in selected: selected.append(grade)
     await update.message.reply_text(
@@ -174,15 +194,20 @@ async def got_manual_grade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
     return ASK_GRADE
 
 
-# ── Steps 4a+4b: Price + Volume per grade (looped) ─────────────────
+# ── Steps 4a+4b: Price + Volume per grade ──────────────────────────
 
 async def _ask_price(q_or_m, ctx) -> int:
     queue = ctx.user_data["grade_queue"]
     if not queue:
-        return await _go_pump(q_or_m, ctx)
+        return await _go_additional(q_or_m, ctx)
     grade = queue[0]
     ctx.user_data["_cur_grade"] = grade
-    text = f"💰 *Step 4 — Price for {grade}*\n\nEnter unit price per m³ (ETB):"
+    total_grades = len(ctx.user_data["selected_grades"])
+    done_grades  = total_grades - len(queue)
+    text = (
+        f"💰 *Step 4 — Grade {done_grades+1} of {total_grades}: {grade}*\n\n"
+        f"Enter unit price per m³ (ETB):"
+    )
     kb = back_kb("grades")
     if hasattr(q_or_m, "edit_message_text"):
         await q_or_m.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
@@ -196,12 +221,13 @@ async def got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         price = float(update.message.text.strip().replace(",", ""))
         if price <= 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("⚠️ Enter a valid positive price (e.g. 14500):", reply_markup=back_kb("grades"))
+        await update.message.reply_text(
+            "⚠️ Enter a valid positive price (e.g. 14500):", reply_markup=back_kb("grades"))
         return ASK_PRICE
-    grade = ctx.user_data["_cur_grade"]
     ctx.user_data["_cur_price"] = price
+    grade = ctx.user_data["_cur_grade"]
     await update.message.reply_text(
-        f"📊 *Volume for {grade}*\n\nPrice locked: *{price:,.2f} ETB/m³*\nNow enter the volume (m³):",
+        f"📊 *Volume for {grade}*\n\nPrice locked: *{price:,.2f} ETB/m³*\nEnter volume (m³):",
         parse_mode="Markdown", reply_markup=back_kb("price"))
     return ASK_VOLUME
 
@@ -211,7 +237,8 @@ async def got_volume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         vol = float(update.message.text.strip().replace(",", ""))
         if vol <= 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("⚠️ Enter a valid positive volume:", reply_markup=back_kb("price"))
+        await update.message.reply_text(
+            "⚠️ Enter a valid positive volume:", reply_markup=back_kb("price"))
         return ASK_VOLUME
 
     grade = ctx.user_data.pop("_cur_grade")
@@ -224,18 +251,48 @@ async def got_volume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     done_line = f"✅ *{grade}* — {vol:,.2f} m³ × {price:,.2f} ETB = *{total:,.2f} ETB*"
 
     if remaining:
-        await update.message.reply_text(done_line + f"\n\n_{len(remaining)} grade(s) remaining…_", parse_mode="Markdown")
+        await update.message.reply_text(
+            done_line + f"\n\n_{len(remaining)} grade(s) remaining…_", parse_mode="Markdown")
         return await _ask_price(update.message, ctx)
 
     summary = grade_summary(ctx)
-    await update.message.reply_text(f"{done_line}\n\n📋 *Grades Summary:*\n{summary}", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"{done_line}\n\n📋 *Grades Summary:*\n{summary}", parse_mode="Markdown")
+    return await _go_additional(update.message, ctx)
+
+
+# ── Step 5: Additional Services ────────────────────────────────────
+
+async def _go_additional(m_or_q, ctx) -> int:
+    text = (
+        "➕ *Step 5:* Additional Services\n\n"
+        "Enter total ETB for any extra services _(vibrator, labour, etc.)_\n"
+        "Enter *0* if none."
+    )
+    kb = back_kb("grades")
+    if hasattr(m_or_q, "reply_text"):
+        await m_or_q.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await m_or_q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    return ASK_ADDITIONAL
+
+
+async def got_additional(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        amt = float(update.message.text.strip().replace(",", ""))
+        if amt < 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Enter 0 or a positive amount:", reply_markup=back_kb("grades"))
+        return ASK_ADDITIONAL
+    ctx.user_data["extra_service"] = amt
     return await _go_pump(update.message, ctx)
 
 
-# ── Step 5: Pump type ──────────────────────────────────────────────
+# ── Step 6: Pump type ──────────────────────────────────────────────
 
 async def _go_pump(m_or_q, ctx) -> int:
-    text = "🚰 *Step 5:* Select Pump Service:"
+    text = "🚰 *Step 6:* Select Pump Service:"
     kb = pump_type_kb()
     if hasattr(m_or_q, "reply_text"):
         await m_or_q.reply_text(text, parse_mode="Markdown", reply_markup=kb)
@@ -251,13 +308,28 @@ async def cb_pump_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if action == "none":
         ctx.user_data["pump"] = None
         await query.edit_message_text("🚫 No pump service.")
-        return await _go_additional(query.message, ctx)
+        return await _generate_quote(query.message, ctx)
 
     label = "Elephant Pump" if action == "elephant" else "Stationary Pump"
     ctx.user_data["_pump_type"] = action
     await query.edit_message_text(
-        f"💰 *{label} Rate*\n\nEnter pump price per m³ (ETB):",
-        parse_mode="Markdown", reply_markup=back_kb("pump_type"))
+        f"💰 *{label} Rate*\n\nEnter pump price per m³ (ETB):\n_Or tap Skip to add pump without price._",
+        parse_mode="Markdown", reply_markup=pump_rate_kb())
+    return ASK_PUMP_RATE
+
+
+# ── Step 7: Pump rate ──────────────────────────────────────────────
+
+async def cb_pump_rate_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    action = query.data.split(":", 1)[1]
+
+    if action == "skip":
+        ptype = ctx.user_data.pop("_pump_type", "elephant")
+        label = "Elephant Pump" if ptype == "elephant" else "Stationary Pump"
+        ctx.user_data["pump"] = {"type": label, "rate": None, "total": 0}
+        await query.edit_message_text(f"⏭️ *{label}* added _(price TBD)_.", parse_mode="Markdown")
+        return await _generate_quote(query.message, ctx)
     return ASK_PUMP_RATE
 
 
@@ -266,7 +338,8 @@ async def got_pump_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         rate = float(update.message.text.strip().replace(",", ""))
         if rate <= 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("⚠️ Enter a valid positive rate:", reply_markup=back_kb("pump_type"))
+        await update.message.reply_text(
+            "⚠️ Enter a valid positive rate:", reply_markup=pump_rate_kb())
         return ASK_PUMP_RATE
 
     ptype = ctx.user_data.pop("_pump_type", "elephant")
@@ -276,28 +349,6 @@ async def got_pump_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         f"✅ *{label}* — {rate:,.2f} ETB/m³ × {total_vol:,.2f} m³ = *{rate * total_vol:,.2f} ETB*",
         parse_mode="Markdown")
-    return await _go_additional(update.message, ctx)
-
-
-# ── Step 6: Additional services ────────────────────────────────────
-
-async def _go_additional(message, ctx) -> int:
-    await message.reply_text(
-        "➕ *Step 6:* Additional Services\n\n"
-        "Enter the total ETB for any extra services _(vibrator, labour, etc.)_\n"
-        "Enter *0* if none.",
-        parse_mode="Markdown", reply_markup=back_kb("pump_type"))
-    return ASK_ADDITIONAL
-
-
-async def got_additional(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        amt = float(update.message.text.strip().replace(",", ""))
-        if amt < 0: raise ValueError
-    except ValueError:
-        await update.message.reply_text("⚠️ Enter 0 or a positive amount:", reply_markup=back_kb("pump_type"))
-        return ASK_ADDITIONAL
-    ctx.user_data["extra_service"] = amt
     return await _generate_quote(update.message, ctx)
 
 
@@ -308,11 +359,14 @@ async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     target = query.data.split(":", 1)[1]
 
     if target == "client":
-        await query.edit_message_text("👤 *Step 1:* Enter Client / Company Name:", parse_mode="Markdown")
+        await query.edit_message_text(
+            "👤 *Step 1:* Enter Client / Company Name:", parse_mode="Markdown")
         return ASK_CLIENT
 
     if target == "location":
-        await query.edit_message_text("📍 *Step 2:* Enter Project Location:", parse_mode="Markdown", reply_markup=back_kb("client"))
+        await query.edit_message_text(
+            "📍 *Step 2:* Enter Project Location:", parse_mode="Markdown",
+            reply_markup=back_kb("client"))
         return ASK_LOCATION
 
     if target == "grades":
@@ -329,12 +383,34 @@ async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             parse_mode="Markdown", reply_markup=back_kb("grades"))
         return ASK_PRICE
 
+    if target == "additional":
+        await query.edit_message_text(
+            "➕ *Step 5:* Additional Services\n\n"
+            "Enter total ETB for any extra services _(vibrator, labour, etc.)_\n"
+            "Enter *0* if none.",
+            parse_mode="Markdown", reply_markup=back_kb("grades"))
+        return ASK_ADDITIONAL
+
     if target == "pump_type":
-        await query.edit_message_text("🚰 *Step 5:* Select Pump Service:", parse_mode="Markdown", reply_markup=pump_type_kb())
+        await query.edit_message_text(
+            "🚰 *Step 6:* Select Pump Service:",
+            parse_mode="Markdown", reply_markup=pump_type_kb())
         return ASK_PUMP_TYPE
 
     await query.edit_message_text("⚠️ Navigation error. Use /quote to restart.")
     return ConversationHandler.END
+
+
+# ── New Quote button ───────────────────────────────────────────────
+
+async def cb_new_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    ctx.user_data.clear(); init_session(ctx)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "📄 *CoBuilt Solutions — Quote Generator*\n\n👤 *Step 1:* Enter Client / Company Name:",
+        parse_mode="Markdown")
+    return ASK_CLIENT
 
 
 # ── PDF generation ─────────────────────────────────────────────────
@@ -360,16 +436,24 @@ async def _generate_quote(message, ctx) -> int:
         logger.error(f"PDF error: {e}", exc_info=True)
         await message.reply_text("❌ Failed to generate PDF. Try /quote again.")
         return ConversationHandler.END
+
     with open(pdf_path, "rb") as f:
         await message.reply_document(
-            document=f, filename=f"CoBuilt_Quote_{safe}_{quote_no}.pdf",
-            caption=f"📄 Quote *{quote_no}* for *{client}* is ready!\n📍 {location}",
-            parse_mode="Markdown")
-    return ConversationHandler.END
+            document=f,
+            filename=f"CoBuilt_Quote_{safe}_{quote_no}.pdf",
+            caption=(
+                f"📄 Quote *{quote_no}* for *{client}* is ready!\n"
+                f"📍 {location}"
+            ),
+            parse_mode="Markdown",
+            reply_markup=new_quote_kb(),
+        )
+    return ASK_NEW_QUOTE
 
 
 async def unexpected(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚠️ Please use the buttons or follow the step.\nSend /cancel to abort.")
+    await update.message.reply_text(
+        "⚠️ Please use the buttons or follow the step.\nSend /cancel to abort.")
 
 
 # ── Main ───────────────────────────────────────────────────────────
@@ -378,10 +462,17 @@ def main():
     token = os.environ.get("BOT_TOKEN", "")
     if not token: raise RuntimeError("BOT_TOKEN not set!")
     logger.info("Starting CoBuilt Quote Bot…")
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     app = Application.builder().token(token).build()
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("quote", cmd_quote)],
+        entry_points=[
+            CommandHandler("quote", cmd_quote),
+            CallbackQueryHandler(cb_new_quote, pattern=r"^newquote:start$"),
+        ],
         states={
             ASK_CLIENT:      [MessageHandler(filters.TEXT & ~filters.COMMAND, got_client)],
             ASK_LOCATION:    [MessageHandler(filters.TEXT & ~filters.COMMAND, got_location),
@@ -393,22 +484,24 @@ def main():
                               CallbackQueryHandler(cb_back, pattern=r"^back:")],
             ASK_VOLUME:      [MessageHandler(filters.TEXT & ~filters.COMMAND, got_volume),
                               CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_ADDITIONAL:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_additional),
+                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
             ASK_PUMP_TYPE:   [CallbackQueryHandler(cb_pump_type, pattern=r"^pump:"),
                               CallbackQueryHandler(cb_back, pattern=r"^back:")],
             ASK_PUMP_RATE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_pump_rate),
+                              CallbackQueryHandler(cb_pump_rate_skip, pattern=r"^pumprate:"),
                               CallbackQueryHandler(cb_back, pattern=r"^back:")],
-            ASK_ADDITIONAL:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_additional),
-                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_NEW_QUOTE:   [CallbackQueryHandler(cb_new_quote, pattern=r"^newquote:start$")],
         },
-        fallbacks=[CommandHandler("cancel", cmd_cancel),
-                   MessageHandler(filters.TEXT & ~filters.COMMAND, unexpected)],
+        fallbacks=[
+            CommandHandler("cancel", cmd_cancel),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, unexpected),
+        ],
         allow_reentry=True,
     )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
