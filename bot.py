@@ -13,6 +13,10 @@ from pdf_generator import generate_quote_pdf
 logging.basicConfig(format="%(asctime)s  %(name)s  %(levelname)s  %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+import warnings
+from telegram.warnings import PTBUserWarning
+warnings.filterwarnings("ignore", category=PTBUserWarning)
+
 DATA_DIR     = os.environ.get("DATA_DIR", "/data")
 PDF_DIR      = os.path.join(DATA_DIR, "quotes")
 COUNTER_FILE = os.path.join(DATA_DIR, "counter.txt")
@@ -402,6 +406,9 @@ def main():
     )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
