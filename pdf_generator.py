@@ -11,7 +11,6 @@ from reportlab.platypus import (
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# ── Brand colours ──────────────────────────────────────────────────
 ORANGE      = colors.HexColor("#F47920")
 NAVY        = colors.HexColor("#2B2D6E")
 ROW_ALT     = colors.HexColor("#FFF4EC")
@@ -19,15 +18,12 @@ BORDER_GRAY = colors.HexColor("#D5D5D5")
 TEXT_DARK   = colors.HexColor("#1A1A1A")
 TEXT_MED    = colors.HexColor("#555555")
 WHITE       = colors.white
-
 PAGE_W, PAGE_H = A4
 MARGIN = 18 * mm
 
 
-# ── Custom HR Flowable ─────────────────────────────────────────────
 class HRule(Flowable):
-    def __init__(self, width, thickness=0.6, color=BORDER_GRAY,
-                 space_before=0, space_after=0):
+    def __init__(self, width, thickness=0.6, color=BORDER_GRAY, space_before=0, space_after=0):
         super().__init__()
         self._width = width; self._thickness = thickness
         self._color = color; self._sb = space_before; self._sa = space_after
@@ -43,7 +39,6 @@ class HRule(Flowable):
         self.canv.line(0, self._sa, self._width, self._sa)
 
 
-# ── Font registration ──────────────────────────────────────────────
 _FONTS_REGISTERED = False
 
 def _register_fonts(assets_dir: str):
@@ -66,45 +61,28 @@ def _register_fonts(assets_dir: str):
     except Exception as e:
         print(f"Font loading error: {e}")
 
-def _title_font(assets_dir: str) -> str:
+def _title_font(assets_dir):
     _register_fonts(assets_dir)
     return "SporteCollege" if _FONTS_REGISTERED else "Helvetica-Bold"
 
-def _bold_font(assets_dir: str) -> str:
-    _register_fonts(assets_dir)
-    return "SporteCollege-Bold" if _FONTS_REGISTERED else "Helvetica-Bold"
-
-
-# ── Style + format helpers ─────────────────────────────────────────
-def _s(name, **kw):
-    d = dict(fontName="Helvetica", fontSize=9, leading=12, textColor=TEXT_DARK)
-    d.update(kw)
-    return ParagraphStyle(name, **d)
-
-def _fmt(n) -> str:
-    return f"{n:,.2f}" if n is not None else "TBD"
-
-
-# ── Assets helper ──────────────────────────────────────────────────
-def _assets_dir() -> str:
-    """
-    Always returns the absolute path to the assets/ folder sitting
-    next to this file — works on local machine and on Render.
-    """
+def _assets_dir():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
+def _s(name, **kw):
+    d = dict(fontName="Helvetica", fontSize=9, leading=12, textColor=TEXT_DARK)
+    d.update(kw); return ParagraphStyle(name, **d)
 
-# ══════════════════════════════════════════════════════════════════
-#  PUBLIC API
-# ══════════════════════════════════════════════════════════════════
+def _fmt(n):
+    return f"{n:,.2f}" if n is not None else "TBD"
+
 
 def generate_quote_pdf(
     path: str,
     client: str,
     location: str,
-    grades: list,           # [{grade, volume, unit_price, total}, ...]
-    pump: dict | None,      # {type, rate, total} or None
-    extra_service: float,   # informational only — not added to subtotal
+    grades: list,
+    pump: dict | None,
+    validity: str,
     quote_no: str,
     date_str: str,
 ):
@@ -121,7 +99,6 @@ def generate_quote_pdf(
     usable_w   = PAGE_W - 2 * MARGIN
     story      = []
     title_font = _title_font(ASSETS)
-    bold_font  = _bold_font(ASSETS)
 
     # ── 1. HEADER ─────────────────────────────────────────────────
     logo_path = os.path.join(ASSETS, "logo_clean.png")
@@ -190,10 +167,10 @@ def generate_quote_pdf(
 
     cw   = usable_w / 4
     info = Table([
-        [*ic("Company:",        client),      *ic("Additional service:", pump_label)],
-        [*ic("Location:",       location),    *ic("Payment terms:",      "100% advance")],
+        [*ic("Company:",        client),      *ic("Pump Service:",      pump_label)],
+        [*ic("Location:",       location),    *ic("Payment terms:",     "100% advance")],
         [*ic("Quantity:",       f"{total_volume:,.2f}m\u00b3"),
-         *ic("Validity of quote:", "Valid for 3 days")],
+         *ic("Validity of quote:", f"Valid for {validity}")],
         [*ic("Concrete Grade:", grade_labels),
          Paragraph("", _s("E1")), Paragraph("", _s("E2"))],
     ], colWidths=[cw*0.65, cw*1.35, cw*0.72, cw*1.28])
@@ -216,11 +193,8 @@ def generate_quote_pdf(
     cPrc  = usable_w * 0.18
     cTot  = usable_w * 0.17
 
-    S_TH = _s("TH", fontName="Helvetica-Bold", fontSize=9,
-               textColor=WHITE, alignment=TA_CENTER)
+    S_TH = _s("TH", fontName="Helvetica-Bold", fontSize=9, textColor=WHITE, alignment=TA_CENTER)
     S_TD = _s("TD", fontSize=9, alignment=TA_CENTER)
-    S_NOTE_TD = _s("NTD", fontSize=8, alignment=TA_CENTER,
-                   textColor=TEXT_MED, fontName="Helvetica-Oblique")
 
     rows = [[
         Paragraph("No.",         S_TH),
@@ -231,7 +205,6 @@ def generate_quote_pdf(
         Paragraph("Total Price", S_TH),
     ]]
 
-    # Concrete grade rows
     for i, g in enumerate(grades, 1):
         rows.append([
             Paragraph(str(i),                        S_TD),
@@ -242,22 +215,8 @@ def generate_quote_pdf(
             Paragraph(_fmt(g["total"]),              S_TD),
         ])
 
-    # Additional services row (informational — no price in totals)
-    if extra_service and extra_service > 0:
-        rows.append([
-            Paragraph("\u2014",               S_NOTE_TD),
-            Paragraph("Additional Services",  S_TD),
-            Paragraph("\u2014",               S_NOTE_TD),
-            Paragraph("\u2014",               S_NOTE_TD),
-            Paragraph("(see note)",           S_NOTE_TD),
-            Paragraph(_fmt(extra_service),    S_TD),
-        ])
-
-    # Pump row
     if pump:
-        pump_price_str = (
-            _fmt(pump["rate"]) + "/m\u00b3" if pump["rate"] else "TBD"
-        )
+        pump_price_str = _fmt(pump["rate"]) + "/m\u00b3" if pump["rate"] else "TBD"
         rows.append([
             Paragraph("\u2014",                        S_TD),
             Paragraph(pump["type"],                    S_TD),
@@ -282,7 +241,7 @@ def generate_quote_pdf(
     story.append(items)
     story.append(Spacer(1, 4))
 
-    # ── 6. TOTALS (grades + pump only, NOT extra_service) ─────────
+    # ── 6. TOTALS ─────────────────────────────────────────────────
     subtotal    = sum(g["total"] for g in grades) + (pump["total"] if pump else 0)
     vat         = subtotal * 0.15
     grand_total = subtotal + vat
@@ -321,9 +280,6 @@ def generate_quote_pdf(
     story.append(Paragraph(
         "<i>Note: VAT (15%) has been included in the Grand Total above.</i>", S_NOTE))
     story.append(Paragraph(
-        "<i>Additional Services amount is listed for reference only and is not included in pricing.</i>",
-        S_NOTE))
-    story.append(Paragraph(
         "- As the order volume increases, we can extend a discount accordingly.", S_NOTE))
     story.append(Spacer(1, 10))
 
@@ -332,11 +288,13 @@ def generate_quote_pdf(
         "<b>Terms &amp; Conditions</b>",
         _s("TCH", fontName="Helvetica-Bold", fontSize=9)))
     for t in [
-        "Delivery Schedule: Within 7\u201310 working days from confirmation.",
+        f"Delivery Schedule: Within 7\u201310 working days from confirmation.",
         "Payment Terms: 100% advance.",
-        "Validity: This quote is valid for 3 days from the date of issue.",
+        f"Validity: This quote is valid for {validity} from the date of issue.",
         "Exclusions: Does not include site preparation, road access issues, "
         "or waiting time beyond 1 hour per truck.",
+        "Reserves the right to ask for compensation due to any issues related "
+        "to access issues or client\u2019s scope.",
     ]:
         story.append(Paragraph(f"\u2022 {t}",
                                _s("TC", fontSize=7.5, textColor=TEXT_MED, leading=10)))
