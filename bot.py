@@ -30,6 +30,7 @@ ALL_GRADES = ["C-20","C-25","C-30","C-35","C-40","C-45","C-50","C-55","C-60"]
     ASK_PUMP_RATE, ASK_VALIDITY, ASK_NEW_QUOTE,
 ) = range(10)
 
+
 # ── Helpers ────────────────────────────────────────────────────────
 
 def next_quote_number() -> str:
@@ -42,12 +43,14 @@ def next_quote_number() -> str:
         f.write(str(n))
     return f"RMX-{n:04d}"
 
+
 def init_session(ctx):
     ctx.user_data.update({
         "client": "", "location": "",
         "selected_grades": [], "grades": [], "grade_queue": [],
-        "pump": None, "validity": "3 Days",
+        "pump": None, "validity": "3 days",
     })
+
 
 def grade_select_kb(selected: list) -> InlineKeyboardMarkup:
     buttons, row = [], []
@@ -64,6 +67,7 @@ def grade_select_kb(selected: list) -> InlineKeyboardMarkup:
     buttons.append([InlineKeyboardButton("◀️ Back", callback_data="back:location")])
     return InlineKeyboardMarkup(buttons)
 
+
 def pump_type_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🐘 Elephant Pump",    callback_data="pump:elephant"),
@@ -72,28 +76,83 @@ def pump_type_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("◀️ Back",              callback_data="back:grades")],
     ])
 
+
 def pump_rate_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏭️ Skip (TBD)", callback_data="pumprate:skip")],
+        [InlineKeyboardButton("⏭️ Skip", callback_data="pumprate:skip")],
         [InlineKeyboardButton("◀️ Back", callback_data="back:pump_type")],
     ])
 
-# ── Step Logic ─────────────────────────────────────────────────────
+
+def new_quote_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Start New Quote", callback_data="newquote:start"),
+    ]])
+
+
+def back_kb(target: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data=f"back:{target}")]])
+
+
+def grade_summary(ctx) -> str:
+    return "\n".join(
+        f"• {g['grade']}: {g['volume']:,.2f} m³ @ {g['unit_price']:,.2f} ETB = {g['total']:,.2f} ETB"
+        for g in ctx.user_data["grades"]
+    ) or "—"
+
+
+# ── Commands ───────────────────────────────────────────────────────
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome to *CoBuilt Solutions* Quote Bot!\nSend /quote to generate a price quote.",
+        parse_mode="Markdown")
+
 
 async def cmd_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data.clear(); init_session(ctx)
-    await update.message.reply_text("📄 *CoBuilt Solutions — Quote Generator*\n\n👤 *Step 1:* Enter Client Name:", parse_mode="Markdown")
+    await update.message.reply_text(
+        "📄 *CoBuilt Solutions — Quote Generator*\n\n👤 *Step 1:* Enter Client / Company Name:",
+        parse_mode="Markdown")
     return ASK_CLIENT
 
+
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data.clear()
+    await update.message.reply_text("❌ Quote cancelled. Send /quote to start again.")
+    return ConversationHandler.END
+
+
+# ── Step 1: Client ─────────────────────────────────────────────────
+
 async def got_client(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data["client"] = update.message.text.strip()
-    await update.message.reply_text("📍 *Step 2:* Enter Project Location:", parse_mode="Markdown")
+    name = update.message.text.strip()
+    if not name:
+        await update.message.reply_text("⚠️ Client name cannot be empty. Try again:")
+        return ASK_CLIENT
+    ctx.user_data["client"] = name
+    await update.message.reply_text(
+        "📍 *Step 2:* Enter Project Location:",
+        parse_mode="Markdown", reply_markup=back_kb("client"))
     return ASK_LOCATION
 
+
+# ── Step 2: Location ───────────────────────────────────────────────
+
 async def got_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data["location"] = update.message.text.strip()
-    await update.message.reply_text("🏗️ *Step 3:* Select Concrete Grades:", reply_markup=grade_select_kb([]))
+    loc = update.message.text.strip()
+    if not loc:
+        await update.message.reply_text("⚠️ Location cannot be empty. Try again:")
+        return ASK_LOCATION
+    ctx.user_data["location"] = loc
+    ctx.user_data["selected_grades"] = []
+    await update.message.reply_text(
+        "🏗️ *Step 3:* Select Concrete Grades — tap to toggle, press *✔️ Done* to confirm:",
+        parse_mode="Markdown", reply_markup=grade_select_kb([]))
     return ASK_GRADE
+
+
+# ── Step 3: Grade multi-select ─────────────────────────────────────
 
 async def cb_grade_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
@@ -101,101 +160,340 @@ async def cb_grade_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
     selected = ctx.user_data.setdefault("selected_grades", [])
 
     if action == "MANUAL":
-        await query.edit_message_text("✍️ Enter a custom grade label:")
+        await query.edit_message_text(
+            "✍️ Enter a custom grade label (e.g. C-55 Special):", parse_mode="Markdown")
         return ASK_MANUAL_GRADE
 
     if action == "DONE":
-        if not selected: return ASK_GRADE
+        if not selected:
+            await query.answer("⚠️ Select at least one grade.", show_alert=True)
+            return ASK_GRADE
         ctx.user_data["grade_queue"] = list(selected)
+        ctx.user_data["grades"] = []
         return await _ask_price(query, ctx)
 
     if action in selected: selected.remove(action)
     else: selected.append(action)
-    await query.edit_message_text("🏗️ *Step 3:* Select Concrete Grades:", reply_markup=grade_select_kb(selected))
+
+    await query.edit_message_text(
+        "🏗️ *Step 3:* Select Concrete Grades — tap to toggle, press *✔️ Done* to confirm:",
+        parse_mode="Markdown", reply_markup=grade_select_kb(selected))
     return ASK_GRADE
+
+
+async def got_manual_grade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    grade = update.message.text.strip().upper()
+    if not grade:
+        await update.message.reply_text("⚠️ Enter a valid grade label:")
+        return ASK_MANUAL_GRADE
+    selected = ctx.user_data.setdefault("selected_grades", [])
+    if grade not in selected: selected.append(grade)
+    await update.message.reply_text(
+        f"✅ *{grade}* added.\n\nContinue selecting or press *✔️ Done*:",
+        parse_mode="Markdown", reply_markup=grade_select_kb(selected))
+    return ASK_GRADE
+
+
+# ── Steps 4a+4b: Price + Volume per grade ──────────────────────────
 
 async def _ask_price(q_or_m, ctx) -> int:
     queue = ctx.user_data["grade_queue"]
-    if not queue: return await _go_pump(q_or_m, ctx)
+    if not queue:
+        return await _go_pump(q_or_m, ctx)
     grade = queue[0]
     ctx.user_data["_cur_grade"] = grade
-    text = f"💰 *Price for {grade}*\nEnter unit price per m³ (ETB):"
-    if hasattr(q_or_m, "edit_message_text"): await q_or_m.edit_message_text(text, parse_mode="Markdown")
-    else: await q_or_m.reply_text(text, parse_mode="Markdown")
+    total_grades = len(ctx.user_data["selected_grades"])
+    done_grades  = total_grades - len(queue)
+    text = (
+        f"💰 *Step 4 — Grade {done_grades+1} of {total_grades}: {grade}*\n\n"
+        f"Enter unit price per m³ (ETB):"
+    )
+    kb = back_kb("grades")
+    if hasattr(q_or_m, "edit_message_text"):
+        await q_or_m.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await q_or_m.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     return ASK_PRICE
 
+
 async def got_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data["_cur_price"] = float(update.message.text.replace(",", ""))
-    await update.message.reply_text(f"📊 Enter volume (m³) for *{ctx.user_data['_cur_grade']}*:", parse_mode="Markdown")
+    try:
+        price = float(update.message.text.strip().replace(",", ""))
+        if price <= 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Enter a valid positive price (e.g. 14500):", reply_markup=back_kb("grades"))
+        return ASK_PRICE
+    ctx.user_data["_cur_price"] = price
+    grade = ctx.user_data["_cur_grade"]
+    await update.message.reply_text(
+        f"📊 *Volume for {grade}*\n\nPrice locked: *{price:,.2f} ETB/m³*\nEnter volume (m³):",
+        parse_mode="Markdown", reply_markup=back_kb("price"))
     return ASK_VOLUME
 
+
 async def got_volume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    vol = float(update.message.text.replace(",", ""))
-    grade, price = ctx.user_data.pop("_cur_grade"), ctx.user_data.pop("_cur_price")
-    ctx.user_data["grades"].append({"grade": grade, "volume": vol, "unit_price": price, "total": price * vol})
+    try:
+        vol = float(update.message.text.strip().replace(",", ""))
+        if vol <= 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Enter a valid positive volume:", reply_markup=back_kb("price"))
+        return ASK_VOLUME
+
+    grade = ctx.user_data.pop("_cur_grade")
+    price = ctx.user_data.pop("_cur_price")
+    total = price * vol
+    ctx.user_data["grades"].append({"grade": grade, "volume": vol, "unit_price": price, "total": total})
     ctx.user_data["grade_queue"].pop(0)
-    return await _ask_price(update.message, ctx)
+
+    remaining = ctx.user_data["grade_queue"]
+    done_line = f"✅ *{grade}* — {vol:,.2f} m³ × {price:,.2f} ETB = *{total:,.2f} ETB*"
+
+    if remaining:
+        await update.message.reply_text(
+            done_line + f"\n\n_{len(remaining)} grade(s) remaining…_", parse_mode="Markdown")
+        return await _ask_price(update.message, ctx)
+
+    summary = grade_summary(ctx)
+    await update.message.reply_text(
+        f"{done_line}\n\n📋 *Grades Summary:*\n{summary}", parse_mode="Markdown")
+    return await _go_pump(update.message, ctx)
+
+
+# ── Step 5: Pump type ──────────────────────────────────────────────
 
 async def _go_pump(m_or_q, ctx) -> int:
     text = "🚰 *Step 5:* Select Pump Service:"
     kb = pump_type_kb()
-    if hasattr(m_or_q, "reply_text"): await m_or_q.reply_text(text, parse_mode="Markdown", reply_markup=kb)
-    else: await m_or_q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    if hasattr(m_or_q, "reply_text"):
+        await m_or_q.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await m_or_q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
     return ASK_PUMP_TYPE
+
 
 async def cb_pump_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     action = query.data.split(":", 1)[1]
+
     if action == "none":
         ctx.user_data["pump"] = None
-        return await _ask_validity(query.message, ctx)
+        await query.edit_message_text("🚫 No pump service.")
+        return await _go_validity(query.message, ctx)
+
+    label = "Elephant Pump" if action == "elephant" else "Stationary Pump"
     ctx.user_data["_pump_type"] = action
-    await query.edit_message_text("💰 Enter pump price per m³ (ETB):", reply_markup=pump_rate_kb())
+    await query.edit_message_text(
+        f"💰 *{label} Rate*\n\nEnter pump price per m³ (ETB):\n_Or tap Skip to add pump without price._",
+        parse_mode="Markdown", reply_markup=pump_rate_kb())
     return ASK_PUMP_RATE
 
-async def got_pump_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    rate = float(update.message.text.replace(",", ""))
-    ptype = ctx.user_data.pop("_pump_type")
-    label = "Elephant Pump" if ptype == "elephant" else "Stationary Pump"
-    total_vol = sum(g["volume"] for g in ctx.user_data["grades"])
-    ctx.user_data["pump"] = {"type": label, "rate": rate, "total": rate * total_vol}
-    return await _ask_validity(update.message, ctx)
+
+# ── Step 6: Pump rate ──────────────────────────────────────────────
 
 async def cb_pump_rate_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     ptype = ctx.user_data.pop("_pump_type", "elephant")
-    ctx.user_data["pump"] = {"type": "Elephant Pump" if ptype == "elephant" else "Stationary Pump", "rate": None, "total": 0}
-    return await _ask_validity(query.message, ctx)
+    label = "Elephant Pump" if ptype == "elephant" else "Stationary Pump"
+    ctx.user_data["pump"] = {"type": label, "rate": None, "total": 0}
+    await query.edit_message_text(f"⏭️ *{label}* added _(price TBD)_.", parse_mode="Markdown")
+    return await _go_validity(query.message, ctx)
 
-async def _ask_validity(message, ctx) -> int:
-    await message.reply_text("⏳ *Final Step:* Enter quote validity period (e.g., '3 Days', '7 Days'):", parse_mode="Markdown")
+
+async def got_pump_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        rate = float(update.message.text.strip().replace(",", ""))
+        if rate <= 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Enter a valid positive rate:", reply_markup=pump_rate_kb())
+        return ASK_PUMP_RATE
+
+    ptype = ctx.user_data.pop("_pump_type", "elephant")
+    label = "Elephant Pump" if ptype == "elephant" else "Stationary Pump"
+    total_vol = sum(g["volume"] for g in ctx.user_data["grades"])
+    ctx.user_data["pump"] = {"type": label, "rate": rate, "total": rate * total_vol}
+    await update.message.reply_text(
+        f"✅ *{label}* — {rate:,.2f} ETB/m³ × {total_vol:,.2f} m³ = *{rate * total_vol:,.2f} ETB*",
+        parse_mode="Markdown")
+    return await _go_validity(update.message, ctx)
+
+
+# ── Step 7: Validity of Quote ──────────────────────────────────────
+
+async def _go_validity(message, ctx) -> int:
+    await message.reply_text(
+        "📅 *Step 7:* Validity of Quote\n\n"
+        "How long is this quote valid?\n"
+        "_(e.g. 3 days, 7 days, 2 weeks)_",
+        parse_mode="Markdown",
+        reply_markup=back_kb("pump_type"))
     return ASK_VALIDITY
 
+
 async def got_validity(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data["validity"] = update.message.text.strip()
+    validity = update.message.text.strip()
+    if not validity:
+        await update.message.reply_text(
+            "⚠️ Please enter a validity period (e.g. 3 days):",
+            reply_markup=back_kb("pump_type"))
+        return ASK_VALIDITY
+    ctx.user_data["validity"] = validity
     return await _generate_quote(update.message, ctx)
 
-# ── PDF Generation Logic ───────────────────────────────────────────
 
-async def _generate_quote(message, ctx) -> int:
-    await message.reply_text("⏳ Generating official quote PDF...")
-    # ... (Path and naming logic same as previous)
-    try:
-        generate_quote_pdf(
-            path=pdf_path, 
-            client=ctx.user_data["client"], 
-            location=ctx.user_data["location"],
-            grades=ctx.user_data["grades"], 
-            pump=ctx.user_data["pump"], 
-            validity=ctx.user_data["validity"], # New variable
-            quote_no=next_quote_number(), 
-            date_str=date.today().strftime("%b %d, %Y")
-        )
-        with open(pdf_path, "rb") as f:
-            await message.reply_document(document=f, caption="📄 Quote is ready!")
-    except Exception as e:
-        logger.error(f"PDF Error: {e}")
-        await message.reply_text("❌ Generation failed.")
+# ── Back button router ─────────────────────────────────────────────
+
+async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    target = query.data.split(":", 1)[1]
+
+    if target == "client":
+        await query.edit_message_text(
+            "👤 *Step 1:* Enter Client / Company Name:", parse_mode="Markdown")
+        return ASK_CLIENT
+
+    if target == "location":
+        await query.edit_message_text(
+            "📍 *Step 2:* Enter Project Location:", parse_mode="Markdown",
+            reply_markup=back_kb("client"))
+        return ASK_LOCATION
+
+    if target == "grades":
+        selected = ctx.user_data.get("selected_grades", [])
+        await query.edit_message_text(
+            "🏗️ *Step 3:* Select Concrete Grades — tap to toggle, press *✔️ Done* to confirm:",
+            parse_mode="Markdown", reply_markup=grade_select_kb(selected))
+        return ASK_GRADE
+
+    if target == "price":
+        grade = ctx.user_data.get("_cur_grade", "")
+        await query.edit_message_text(
+            f"💰 *Price for {grade}*\n\nEnter unit price per m³ (ETB):",
+            parse_mode="Markdown", reply_markup=back_kb("grades"))
+        return ASK_PRICE
+
+    if target == "pump_type":
+        await query.edit_message_text(
+            "🚰 *Step 5:* Select Pump Service:",
+            parse_mode="Markdown", reply_markup=pump_type_kb())
+        return ASK_PUMP_TYPE
+
+    if target == "validity":
+        await query.edit_message_text(
+            "📅 *Step 7:* Validity of Quote\n\n"
+            "How long is this quote valid?\n_(e.g. 3 days, 7 days, 2 weeks)_",
+            parse_mode="Markdown", reply_markup=back_kb("pump_type"))
+        return ASK_VALIDITY
+
+    await query.edit_message_text("⚠️ Navigation error. Use /quote to restart.")
     return ConversationHandler.END
 
-# ... (Rest of the standard boilerplate)
+
+# ── New Quote button ───────────────────────────────────────────────
+
+async def cb_new_quote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    ctx.user_data.clear(); init_session(ctx)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "📄 *CoBuilt Solutions — Quote Generator*\n\n👤 *Step 1:* Enter Client / Company Name:",
+        parse_mode="Markdown")
+    return ASK_CLIENT
+
+
+# ── PDF generation ─────────────────────────────────────────────────
+
+async def _generate_quote(message, ctx) -> int:
+    await message.reply_text("⏳ Generating your official quote PDF…")
+    client   = ctx.user_data["client"]
+    location = ctx.user_data["location"]
+    grades   = ctx.user_data["grades"]
+    pump     = ctx.user_data["pump"]
+    validity = ctx.user_data.get("validity", "3 days")
+    quote_no = next_quote_number()
+    today    = date.today().strftime("%b %d, %Y")
+    safe     = client.replace(" ", "_").replace("/", "-")
+    pdf_path = os.path.join(PDF_DIR, f"CoBuilt_Quote_{safe}_{quote_no}.pdf")
+    try:
+        generate_quote_pdf(
+            path=pdf_path, client=client, location=location,
+            grades=grades, pump=pump, validity=validity,
+            quote_no=quote_no, date_str=today,
+        )
+    except Exception as e:
+        logger.error(f"PDF error: {e}", exc_info=True)
+        await message.reply_text("❌ Failed to generate PDF. Try /quote again.")
+        return ConversationHandler.END
+
+    with open(pdf_path, "rb") as f:
+        await message.reply_document(
+            document=f,
+            filename=f"CoBuilt_Quote_{safe}_{quote_no}.pdf",
+            caption=(
+                f"📄 Quote *{quote_no}* for *{client}* is ready!\n"
+                f"📍 {location}"
+            ),
+            parse_mode="Markdown",
+            reply_markup=new_quote_kb(),
+        )
+    return ASK_NEW_QUOTE
+
+
+async def unexpected(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚠️ Please use the buttons or follow the step.\nSend /cancel to abort.")
+
+
+# ── Main ───────────────────────────────────────────────────────────
+
+def main():
+    token = os.environ.get("BOT_TOKEN", "")
+    if not token: raise RuntimeError("BOT_TOKEN not set!")
+    logger.info("Starting CoBuilt Quote Bot…")
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    app = Application.builder().token(token).build()
+
+    conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("quote", cmd_quote),
+            CallbackQueryHandler(cb_new_quote, pattern=r"^newquote:start$"),
+        ],
+        states={
+            ASK_CLIENT:      [MessageHandler(filters.TEXT & ~filters.COMMAND, got_client)],
+            ASK_LOCATION:    [MessageHandler(filters.TEXT & ~filters.COMMAND, got_location),
+                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_GRADE:       [CallbackQueryHandler(cb_grade_select, pattern=r"^gs:"),
+                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_MANUAL_GRADE:[MessageHandler(filters.TEXT & ~filters.COMMAND, got_manual_grade)],
+            ASK_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, got_price),
+                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_VOLUME:      [MessageHandler(filters.TEXT & ~filters.COMMAND, got_volume),
+                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_PUMP_TYPE:   [CallbackQueryHandler(cb_pump_type, pattern=r"^pump:"),
+                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_PUMP_RATE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_pump_rate),
+                              CallbackQueryHandler(cb_pump_rate_skip, pattern=r"^pumprate:"),
+                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_VALIDITY:    [MessageHandler(filters.TEXT & ~filters.COMMAND, got_validity),
+                              CallbackQueryHandler(cb_back, pattern=r"^back:")],
+            ASK_NEW_QUOTE:   [CallbackQueryHandler(cb_new_quote, pattern=r"^newquote:start$")],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cmd_cancel),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, unexpected),
+        ],
+        allow_reentry=True,
+    )
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(conv)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
