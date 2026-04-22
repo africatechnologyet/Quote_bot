@@ -456,7 +456,14 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    app = Application.builder().token(token).build()
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(
+        connect_timeout=30,
+        read_timeout=60,
+        write_timeout=60,
+        media_write_timeout=120,
+    )
+    app = Application.builder().token(token).request(request).build()
 
     conv = ConversationHandler(
         entry_points=[
