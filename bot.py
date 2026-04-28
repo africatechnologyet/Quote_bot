@@ -10,6 +10,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ConversationHandler, ContextTypes, filters,
 )
+from telegram.error import BadRequest
 from pdf_generator import generate_quote_pdf
 
 warnings.filterwarnings("ignore", category=PTBUserWarning)
@@ -387,7 +388,10 @@ async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             parse_mode="Markdown", reply_markup=back_kb("pump_type"))
         return ASK_VALIDITY
 
-    await query.edit_message_text("⚠️ Navigation error. Use /quote to restart.")
+    try:
+        await query.edit_message_text("⚠️ Navigation error. Use /quote to restart.")
+    except BadRequest:
+        pass
     return ConversationHandler.END
 
 
@@ -422,9 +426,15 @@ async def _generate_quote(message, ctx) -> int:
             grades=grades, pump=pump, validity=validity,
             quote_no=quote_no, date_str=today,
         )
+        logger.info(f"PDF generated OK: {pdf_path}")
     except Exception as e:
-        logger.error(f"PDF error: {e}", exc_info=True)
-        await message.reply_text("❌ Failed to generate PDF. Try /quote again.")
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"PDF generation failed: {e}\n{tb}")
+        await message.reply_text(
+            f"❌ Failed to generate PDF.\n\nError: `{e}`",
+            parse_mode="Markdown"
+        )
         return ConversationHandler.END
 
     with open(pdf_path, "rb") as f:
@@ -497,6 +507,13 @@ def main():
         allow_reentry=True,
     )
 
+    async def error_handler(update, context):
+        err = str(context.error)
+        if "Message is not modified" in err:
+            return  # ignore harmless duplicate button taps
+        logger.error(f"Update {update} caused error: {err}", exc_info=context.error)
+
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
