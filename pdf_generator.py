@@ -216,14 +216,15 @@ def generate_quote_pdf(
         ])
 
     if pump:
-        pump_price_str = _fmt(pump["rate"]) + "/m\u00b3" if pump["rate"] else "TBD"
+        pump_price_str = _fmt(pump["rate"]) + "/m\u00b3" if pump["rate"] else "\u2014"
+        pump_total_str = _fmt(pump["total"]) if pump["rate"] else "\u2014"
         rows.append([
             Paragraph("\u2014",                        S_TD),
             Paragraph(pump["type"],                    S_TD),
             Paragraph("\u2014",                        S_TD),
             Paragraph(f"{total_volume:,.2f}m\u00b3",  S_TD),
             Paragraph(pump_price_str,                  S_TD),
-            Paragraph(_fmt(pump["total"]),             S_TD),
+            Paragraph(pump_total_str,                  S_TD),
         ])
 
     items = Table(rows, colWidths=[cNo,cDesc,cGrd,cQty,cPrc,cTot], repeatRows=1)

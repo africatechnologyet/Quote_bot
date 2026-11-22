@@ -283,24 +283,22 @@ async def cb_pump_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return await _go_validity(query.message, ctx)
 
     label = "Elephant Pump" if action == "elephant" else "Stationary Pump"
-    ctx.user_data["_pump_type"] = action
-    await query.edit_message_text(
-        f"💰 *{label} Rate*\n\nEnter pump price per m³ (ETB):",
-        parse_mode="Markdown", reply_markup=pump_rate_kb())
-    return ASK_PUMP_RATE
+    ctx.user_data.pop("_pump_type", None)
+    ctx.user_data["pump"] = {"type": label, "rate": None, "total": 0}
+    await query.edit_message_text(f"✅ *{label}* selected.", parse_mode="Markdown")
+    return await _go_validity(query.message, ctx)
 
 
 # ── Step 6: Pump rate ──────────────────────────────────────────────
 
 async def cb_pump_rate_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    # Skipping the pump price is no longer allowed (old "Skip" buttons in earlier messages land here).
-    query = update.callback_query; await query.answer("Please enter the pump price.")
-    ptype = ctx.user_data.get("_pump_type", "elephant")
+    # Pump price is no longer asked. Old "Skip" buttons in earlier messages: add the pump without a price.
+    query = update.callback_query; await query.answer()
+    ptype = ctx.user_data.pop("_pump_type", "elephant")
     label = "Elephant Pump" if ptype == "elephant" else "Stationary Pump"
-    await query.edit_message_text(
-        f"💰 *{label} Rate*\n\nEnter pump price per m³ (ETB):",
-        parse_mode="Markdown", reply_markup=pump_rate_kb())
-    return ASK_PUMP_RATE
+    ctx.user_data["pump"] = {"type": label, "rate": None, "total": 0}
+    await query.edit_message_text(f"✅ *{label}* selected.", parse_mode="Markdown")
+    return await _go_validity(query.message, ctx)
 
 
 async def got_pump_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
