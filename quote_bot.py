@@ -80,7 +80,6 @@ def pump_type_kb() -> InlineKeyboardMarkup:
 
 def pump_rate_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏭️ Skip", callback_data="pumprate:skip")],
         [InlineKeyboardButton("◀️ Back", callback_data="back:pump_type")],
     ])
 
@@ -286,7 +285,7 @@ async def cb_pump_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     label = "Elephant Pump" if action == "elephant" else "Stationary Pump"
     ctx.user_data["_pump_type"] = action
     await query.edit_message_text(
-        f"💰 *{label} Rate*\n\nEnter pump price per m³ (ETB):\n_Or tap Skip to add pump without price._",
+        f"💰 *{label} Rate*\n\nEnter pump price per m³ (ETB):",
         parse_mode="Markdown", reply_markup=pump_rate_kb())
     return ASK_PUMP_RATE
 
@@ -294,12 +293,14 @@ async def cb_pump_type(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ── Step 6: Pump rate ──────────────────────────────────────────────
 
 async def cb_pump_rate_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
-    ptype = ctx.user_data.pop("_pump_type", "elephant")
+    # Skipping the pump price is no longer allowed (old "Skip" buttons in earlier messages land here).
+    query = update.callback_query; await query.answer("Please enter the pump price.")
+    ptype = ctx.user_data.get("_pump_type", "elephant")
     label = "Elephant Pump" if ptype == "elephant" else "Stationary Pump"
-    ctx.user_data["pump"] = {"type": label, "rate": None, "total": 0}
-    await query.edit_message_text(f"⏭️ *{label}* added _(price TBD)_.", parse_mode="Markdown")
-    return await _go_validity(query.message, ctx)
+    await query.edit_message_text(
+        f"💰 *{label} Rate*\n\nEnter pump price per m³ (ETB):",
+        parse_mode="Markdown", reply_markup=pump_rate_kb())
+    return ASK_PUMP_RATE
 
 
 async def got_pump_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -323,13 +324,32 @@ async def got_pump_rate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 # ── Step 7: Validity of Quote ──────────────────────────────────────
 
+def validity_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ 3 days",  callback_data="validity:3days"),
+         InlineKeyboardButton("✏️ Custom", callback_data="validity:custom")],
+        [InlineKeyboardButton("◀️ Back",    callback_data="back:pump_type")],
+    ])
+
+
 async def _go_validity(message, ctx) -> int:
     await message.reply_text(
-        "📅 *Step 7:* Validity of Quote\n\n"
-        "How long is this quote valid?\n"
-        "_(e.g. 3 days, 7 days, 2 weeks)_",
+        "📅 *Step 7:* Validity of Quote\n\nHow long is this quote valid?",
         parse_mode="Markdown",
-        reply_markup=back_kb("pump_type"))
+        reply_markup=validity_kb())
+    return ASK_VALIDITY
+
+
+async def cb_validity(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    choice = query.data.split(":", 1)[1]
+    if choice == "3days":
+        ctx.user_data["validity"] = "3 days"
+        await query.edit_message_text("📅 Validity: *3 days*", parse_mode="Markdown")
+        return await _generate_quote(query.message, ctx)
+    await query.edit_message_text(
+        "✏️ *Custom validity*\n\nType how long this quote is valid:\n_(e.g. 7 days, 2 weeks, 1 month)_",
+        parse_mode="Markdown", reply_markup=back_kb("validity"))
     return ASK_VALIDITY
 
 
@@ -337,8 +357,8 @@ async def got_validity(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     validity = update.message.text.strip()
     if not validity:
         await update.message.reply_text(
-            "⚠️ Please enter a validity period (e.g. 3 days):",
-            reply_markup=back_kb("pump_type"))
+            "⚠️ Please enter a validity period (e.g. 7 days):",
+            reply_markup=back_kb("validity"))
         return ASK_VALIDITY
     ctx.user_data["validity"] = validity
     return await _generate_quote(update.message, ctx)
@@ -383,9 +403,8 @@ async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     if target == "validity":
         await query.edit_message_text(
-            "📅 *Step 7:* Validity of Quote\n\n"
-            "How long is this quote valid?\n_(e.g. 3 days, 7 days, 2 weeks)_",
-            parse_mode="Markdown", reply_markup=back_kb("pump_type"))
+            "📅 *Step 7:* Validity of Quote\n\nHow long is this quote valid?",
+            parse_mode="Markdown", reply_markup=validity_kb())
         return ASK_VALIDITY
 
     try:
@@ -496,7 +515,8 @@ def main():
             ASK_PUMP_RATE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_pump_rate),
                               CallbackQueryHandler(cb_pump_rate_skip, pattern=r"^pumprate:"),
                               CallbackQueryHandler(cb_back, pattern=r"^back:")],
-            ASK_VALIDITY:    [MessageHandler(filters.TEXT & ~filters.COMMAND, got_validity),
+            ASK_VALIDITY:    [CallbackQueryHandler(cb_validity, pattern=r"^validity:"),
+                              MessageHandler(filters.TEXT & ~filters.COMMAND, got_validity),
                               CallbackQueryHandler(cb_back, pattern=r"^back:")],
             ASK_NEW_QUOTE:   [CallbackQueryHandler(cb_new_quote, pattern=r"^newquote:start$")],
         },
