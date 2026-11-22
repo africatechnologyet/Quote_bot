@@ -1,3 +1,17 @@
+## Two bots in one service
+
+This service runs **two Telegram bots** to save the cost of a second Render service:
+
+| Bot | Code | Token setting |
+|---|---|---|
+| Quote bot (PDF quotes) | `quote_bot.py` | `BOT_TOKEN` |
+| Concrete Price bot (costing) | `price_bot/bot.py` | `PRICE_BOT_TOKEN` |
+
+`bot.py` starts both bots as separate programs, restarts a bot if it crashes (the other keeps running),
+and hides bot tokens in the logs. Leave out `PRICE_BOT_TOKEN` to run only the Quote bot.
+
+---
+
 # CoBuilt Solutions — Quote Bot
 
 A Telegram bot that generates professional concrete price-quote PDFs for CoBuilt Solutions.
